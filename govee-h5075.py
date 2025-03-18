@@ -1,4 +1,5 @@
 #!/usr/bin/python3
+#Modified to add support for Govee H5179 thermometers
 import argparse
 import asyncio
 import json
@@ -87,6 +88,35 @@ class Measurement():
     def to_fahrenheit(temperatureC: float) -> float:
         return temperatureC * 9.0/5.0 + 32
 
+    @staticmethod
+    def unpack_h5179_date(byte_data: bytearray):
+        #Date is received as minutes since 1/1/1970
+        mins_since_1970 = struct.unpack("<I", byte_data[0:4])
+        h5179_date = datetime(year=1970,month=1,day=1) + timedelta(minutes=mins_since_1970[0])
+        return h5179_date
+
+    @staticmethod
+    def twos_complement(n: int, w: int = 16) -> int:
+            """Two's complement integer conversion."""
+            #Courtesy of ThrilleratPlay on Github
+            # Adapted from: https://stackoverflow.com/a/33716541.
+            if n & (1 << (w - 1)):
+                n = n - (1 << w)
+            return n
+    @staticmethod
+    def unpack_H5179_history_record(bytes: bytearray, timestamp: datetime = None, little_endian=True, humidityOffset: float = 0, temperatureOffset: float = 0) -> 'Measurement':
+            
+        # Decode data from Govee 5179
+        # Original courtesy of ThrilleratPlay on Github
+        #https://github.com/Home-Is-Where-You-Hang-Your-Hack/sensor.goveetemp_bt_hci/blob/master/custom_components/govee_ble_hci/govee_advertisement.py#L97
+        temp, hum = struct.unpack_from("<HH", bytes)
+        # Negative temperature stored an two's complement
+        temperature = float(Measurement.twos_complement(temp) / 100.0)
+        relHumidity = float(hum / 100.0)
+        #model = "Govee H5179"
+                    
+        return Measurement(timestamp=timestamp, temperatureC=temperature, relHumidity=relHumidity, humidityOffset=humidityOffset, temperatureOffset=temperatureOffset)
+    
     @staticmethod
     def from_bytes(bytes: bytearray, timestamp: datetime = None, little_endian=False, humidityOffset: float = 0, temperatureOffset: float = 0) -> 'Measurement':
 
@@ -205,7 +235,27 @@ class DataControl():
         self.counted_msg: int = 0
         self.received_msg: int = 0
         self.measurements: 'list[Measurement]' = list()
-
+        self.device_category: str = ""
+        
+        self.set_device_category("")
+        
+    def set_device_category(self,device_type):
+        self.device_category = self.get_device_category(device_type)        
+        return
+    
+    @staticmethod
+    def get_device_category(device_type):
+        
+        if device_type == "H5179":
+            device_category = "H5179"
+        elif device_type in ["H5075","H5074"]:
+            device_category = "H507*"
+        else:
+            device_category = "H507*"
+        
+        return device_category
+            
+ 
     def count(self) -> None:
 
         self.counted_msg += 1
@@ -252,7 +302,7 @@ class MacAndSerial():
 
 class GoveeThermometerHygrometer(BleakClient):
 
-    MAC_PREFIX = "A4:C1:38:"
+    MAC_PREFIX = ["A4:C1:38:","1C:9F:24:"]
 
     UUID_NAME = "00002a00-0000-1000-8000-00805f9b34fb"
     UUID_DEVICE = "494e5445-4c4c-495f-524f-434b535f2011"
@@ -271,7 +321,8 @@ class GoveeThermometerHygrometer(BleakClient):
     REQUEST_HARDWARE = bytearray([0xaa, 0x0d])
     REQUEST_FIRMWARE = bytearray([0xaa, 0x0e])
     REQUEST_MAC_ADDRESS = bytearray([0xaa, 0x0f])
-
+    
+    SEND_RECORDS_H5179_TX_REQUEST = bytearray([0x00, 0x00])
     SEND_RECORDS_TX_REQUEST = bytearray([0x33, 0x01])
     SEND_ALARM_HUMIDTY = bytearray([0x33, 0x03])
     SEND_ALARM_TEMPERATURE = bytearray([0x33, 0x04])
@@ -298,6 +349,7 @@ class GoveeThermometerHygrometer(BleakClient):
         self.humidityOffset: float = 0
         self.temperatureOffset: float = 0
         self.measurement: Measurement = None
+        
 
         self._data_control: DataControl = None
 
@@ -392,19 +444,36 @@ class GoveeThermometerHygrometer(BleakClient):
             if not self._data_control:
                 return
 
-            for i in range(6):
-                minutes_back = struct.unpack(">H", bytes[0:2])[0]
-                if bytes[2 + 3 * i] == 0xff:
-                    continue
+            if self._data_control.device_category == "H5179": 
+                #Get the date of this set of measurements
+                record_time = Measurement.unpack_h5179_date(bytes)
+                for i in range(4):
+                    #maximum 4 measurements in each message
+                    spos = 4 + (i*4)
+                    epos = spos + 4
+                    if bytes[spos] != 0xff:
+                        measurement = Measurement.unpack_H5179_history_record(bytes[spos:epos],timestamp=record_time, humidityOffset=self.humidityOffset, temperatureOffset=self.temperatureOffset)
+                        LOGGER.debug(f"{self.address}: Time: {record_time} temperature={measurement.temperatureC} °C, humidity={measurement.relHumidity} %")
+                        #Save this measurement
+                        self._data_control.measurements.append(measurement)
 
-                timestamp = self._data_control.timestamp - \
-                    timedelta(minutes=minutes_back - i)
-                _ba = bytearray(bytes[2 + 3 * i:5 + 3 * i])
-                measurement = Measurement.from_bytes(
-                    bytes=_ba, timestamp=timestamp, humidityOffset=self.humidityOffset, temperatureOffset=self.temperatureOffset)
-                LOGGER.debug(f"{self.address}: Decoded measurement data("
-                             f"{MyLogger.hexstr(_ba)}) is temperature={measurement.temperatureC} °C, humidity={measurement.relHumidity} %")
-                self._data_control.measurements.append(measurement)
+                    #Change time for next measurement
+                    record_time = record_time - timedelta(minutes=1)
+                    
+            else: # default to H507* 
+                for i in range(6):
+                    minutes_back = struct.unpack(">H", bytes[0:2])[0]
+                    if bytes[2 + 3 * i] == 0xff:
+                        continue
+    
+                    timestamp = self._data_control.timestamp - \
+                        timedelta(minutes=minutes_back - i)
+                    _ba = bytearray(bytes[2 + 3 * i:5 + 3 * i])
+                    measurement = Measurement.from_bytes(
+                        bytes=_ba, timestamp=timestamp, humidityOffset=self.humidityOffset, temperatureOffset=self.temperatureOffset)
+                    LOGGER.debug(f"{self.address}: Decoded measurement data("
+                         f"{MyLogger.hexstr(_ba)}) is temperature={measurement.temperatureC} °C, humidity={measurement.relHumidity} %")
+                    self._data_control.measurements.append(measurement)
 
             self._data_control.count()
 
@@ -462,17 +531,43 @@ class GoveeThermometerHygrometer(BleakClient):
             await super().disconnect()
             LOGGER.info(f"{self.address}: Successfully disconnected")
 
+    async def write_H5179_hist_gatt_char_command(self, uuid: str, command: bytearray, start: int = None, end: int = None) -> None:
+    
+        # H5179 command is the command + start time and end time in minutes since 1/1/1970 00:00
+        _bytearray = bytearray(command)
+        if start and end:
+            _bytearray = _bytearray  + start.to_bytes(4,byteorder="little")
+            _bytearray = _bytearray  + end.to_bytes(4,byteorder="little")
+        else:
+            ba_len = 10 
+            if len(_bytearray) < ba_len:
+                _bytearray.extend([0] * (ba_len - 1 - len(_bytearray)))
+                _checksum = 0
+                for _b in _bytearray:
+                    _checksum ^= _b
+                
+                _bytearray.append(_checksum)      
+                
+        LOGGER.debug("%s: >>> write_gatt_char(%s, %s)" %
+                     (self.address, uuid, MyLogger.hexstr(_bytearray)))
+    
+        await self.write_gatt_char(uuid, _bytearray, response=True)
+        
+        return    
+
+
     async def write_gatt_char_command(self, uuid: str, command: bytearray, params: bytearray = None) -> None:
 
         if not uuid or not command:
             return None
-
+        
         _bytearray = bytearray(command)
         if params:
             _bytearray.extend(params)
-
-        if len(_bytearray) < 20:
-            _bytearray.extend([0] * (19 - len(_bytearray)))
+        
+        ba_len = 20 
+        if len(_bytearray) < ba_len:
+            _bytearray.extend([0] * (ba_len - 1 - len(_bytearray)))
             _checksum = 0
             for _b in _bytearray:
                 _checksum ^= _b
@@ -501,14 +596,31 @@ class GoveeThermometerHygrometer(BleakClient):
                 f"{self.address}: <<< response data({MyLogger.hexstr(bytes)})")
             return bytes.decode().replace("\u0000", "")
 
-    async def requestRecordedData(self, start: int, end: int) -> 'list[Measurement]':
+    async def requestRecordedData(self, start: int, end: int,  device_type: str = "H5075") -> 'list[Measurement]':
 
-        LOGGER.info(f"{self.address}: request recorded measurements from "
+        device_category = DataControl.get_device_category(device_type)
+
+        if device_category == "H5179":
+            records_per_msg = 4
+            LOGGER.info(f"{self.address}: request recorded measurements from "
+                    f"{start} to {end} minutes since 1/1/1970 00:00")
+        else:
+            records_per_msg = 6
+            LOGGER.info(f"{self.address}: request recorded measurements from "
                     f"{start} to {end} minutes in the past")
-
+        
         self._data_control = DataControl(
-            expected_msg=math.ceil((start - end + 1) / 6))
-        await self.write_gatt_char_command(uuid=GoveeThermometerHygrometer.UUID_COMMAND, command=GoveeThermometerHygrometer.SEND_RECORDS_TX_REQUEST, params=[start >> 8, start & 0xff, end >> 8, end & 0xff])
+            expected_msg=math.ceil((start - end + 1) / records_per_msg))
+        #Now set the device category
+        self._data_control.set_device_category(device_type)
+        
+        # Special case for 5179
+        if device_category == "H5179":
+            #H5179
+            await self.write_H5179_hist_gatt_char_command(uuid=GoveeThermometerHygrometer.UUID_COMMAND, command=GoveeThermometerHygrometer.SEND_RECORDS_H5179_TX_REQUEST, start = start, end = end)
+        else:
+            #Default to H507*
+            await self.write_gatt_char_command(uuid=GoveeThermometerHygrometer.UUID_COMMAND, command=GoveeThermometerHygrometer.SEND_RECORDS_TX_REQUEST, params=[start >> 8, start & 0xff, end >> 8, end & 0xff])
 
         i = 0
         while i < 600 and (self._data_control.status not in [DataControl.DATA_CONTROL_COMPLETE, DataControl.DATA_CONTROL_INCOMPLETE]):
@@ -602,12 +714,15 @@ class GoveeThermometerHygrometer(BleakClient):
 
         await self.write_gatt_char_command(uuid=GoveeThermometerHygrometer.UUID_DEVICE, command=GoveeThermometerHygrometer.REQUEST_CURRENT_MEASUREMENT2)
 
-    async def requestMeasurementAndBattery(self) -> None:
+    async def requestMeasurementAndBattery(self, device_type: str = "H5075") -> None:
 
         LOGGER.info(
             f"{self.address}: request current measurement and battery")
-
-        await self.write_gatt_char_command(uuid=GoveeThermometerHygrometer.UUID_COMMAND, command=GoveeThermometerHygrometer.REQUEST_CURRENT_MEASUREMENT)
+        if device_type == "H5179":
+            #This doesn't work, it just returns 01
+            await self.write_H5179_hist_gatt_char_command(uuid=GoveeThermometerHygrometer.UUID_DEVICE, command=GoveeThermometerHygrometer.REQUEST_CURRENT_MEASUREMENT2)
+        else:    
+            await self.write_gatt_char_command(uuid=GoveeThermometerHygrometer.UUID_COMMAND, command=GoveeThermometerHygrometer.REQUEST_CURRENT_MEASUREMENT)
 
     async def setHumidityAlarm(self, alarm: Alarm) -> None:
 
@@ -663,20 +778,33 @@ class GoveeThermometerHygrometer(BleakClient):
     async def scan(consumer, duration: int = 20, unique: bool = True, mac_filter: str = None, progress=None):
 
         found_devices = list()
+        
+        def decode_5179(mfg_data):
+            # Decode advertising data from Govee 5179
+            #Courtesy of ThrilleratPlay on Github
+            #https://github.com/Home-Is-Where-You-Hang-Your-Hack/sensor.goveetemp_bt_hci/blob/master/custom_components/govee_ble_hci/govee_advertisement.py#L97
+            temp, hum, batt = struct.unpack_from("<HHB", mfg_data, 4)
+            # Negative temperature stored an two's complement
+            temperature = float(Measurement.twos_complement(temp) / 100.0)
+            humidity = float(hum / 100.0)
+            battery = int(batt)
+                        
+            return temperature, humidity, battery
 
         def callback(device: BLEDevice, advertising_data: AdvertisementData):
 
             if unique is False or device.address not in found_devices:
                 found_devices.append(device.address)
-                if device.name and device.address.upper().startswith(GoveeThermometerHygrometer.MAC_PREFIX):
+                LOGGER.debug(f"{device.address} ({device.name})")
+                if device.name and device.address.upper()[0:9] in GoveeThermometerHygrometer.MAC_PREFIX:
+                    #print (advertising_data)
                     if 0xec88 in advertising_data.manufacturer_data:
                         LOGGER.debug(
                             f"{device.address} ({device.name}): Received advertisement data({MyLogger.hexstr(advertising_data.manufacturer_data[0xec88])})")
 
                         if device.address in alias.aliases:
                             humidityOffset = alias.aliases[device.address][1] if alias.aliases[device.address][1] else 0.0
-                            temperatureOffset = alias.aliases[device.address][
-                                2] if alias.aliases[device.address][2] else 0.0
+                            temperatureOffset = alias.aliases[device.address][2] if alias.aliases[device.address][2] else 0.0
                         else:
                             humidityOffset = 0.0
                             temperatureOffset = 0.0
@@ -692,6 +820,16 @@ class GoveeThermometerHygrometer(BleakClient):
 
                         consumer(device.address, device.name,
                                  battery, measurement)
+                    elif 0x8801 in advertising_data.manufacturer_data:
+                    #Govee 5179
+                        LOGGER.debug(
+                            f"{device.address} ({device.name}): Received advertisement data({MyLogger.hexstr(advertising_data.manufacturer_data[0x8801])})")
+
+                        temperatureC, relHumidity, battery = decode_5179(advertising_data.manufacturer_data[0x8801])
+                        measurement = Measurement(datetime.now(), temperatureC, relHumidity, 0, 0)
+                        consumer(device.address, device.name,
+                                 battery, measurement)
+
 
                 elif device.name and progress:
                     progress(len(found_devices))
@@ -778,7 +916,7 @@ class Alias():
                     for line in ins:
                         _m = re.match(
                             r"([0-9A-Fa-f:]+) +([^ ]+)( (-?\d+\.\d) (-?\d+\.\d))?$", line)
-                        if _m and _m.groups()[0].upper().startswith(GoveeThermometerHygrometer.MAC_PREFIX):
+                        if _m and _m.groups()[0].upper()[0:9] in GoveeThermometerHygrometer.MAC_PREFIX:
 
                             alias = _m.groups()[1].strip()
                             humidityOffset = float(_m.groups()[3]) if _m.groups()[
@@ -794,7 +932,7 @@ class Alias():
 
     def resolve(self, label: str) -> str:
 
-        if label.upper().startswith(GoveeThermometerHygrometer.MAC_PREFIX):
+        if label.upper()[0:9] in GoveeThermometerHygrometer.MAC_PREFIX:
             return label
         else:
             macs = [
@@ -826,6 +964,8 @@ def arg_parse(args: 'list[str]') -> dict:
         '--set-temperature-offset', metavar="<offset>", help='set offset for temperature to calibrate. Range is from -3.0 to 3.0 in steps of 0.1, e.g. -1.0', type=float)
     parser.add_argument(
         '-d', '--data', help='request recorded data for given MAC address or alias', action='store_true')
+    parser.add_argument(
+        '--device-type', help='specify type of thermometer H5179, H5074 or H5075 (default)', type = str, default = "H5075")
     parser.add_argument(
         '--start', metavar="<hhh:mm>", help='request recorded data from start time expression, e.g. 480:00 (here max. value 20 days)', type=str, default=None)
     parser.add_argument(
@@ -900,7 +1040,7 @@ async def status(label: str, _json: bool = False) -> None:
         await device.disconnect()
 
 
-async def device_info(label: str, _json: bool = False) -> None:
+async def device_info(label: str, _json: bool = False, device_type: str = "H5075") -> None:
 
     try:
         mac = alias.resolve(label=label)
@@ -913,7 +1053,8 @@ async def device_info(label: str, _json: bool = False) -> None:
         await device.requestTemperatureOffset()
         await device.requestHardwareVersion()
         await device.requestFirmwareVersion()
-        await device.requestMeasurementAndBattery()
+        await device.requestBatteryLevel()
+        await device.requestMeasurementAndBattery(device_type)
 
         await asyncio.sleep(.5)
         if _json:
@@ -996,22 +1137,39 @@ async def configure_device(label: str, humidityAlarm: str = None, temperatureAla
         await device.disconnect()
 
 
-async def recorded_data(label: str, start: str, end: str, _json: bool = False):
+async def recorded_data(label: str, start: str, end: str, _json: bool = False, device_type: str = "H5075"):
 
     def parseTimeStr(s: str) -> int:
 
         a = s.split(":")
         return (int(a[0]) * 60 + int(a[1])) if len(a) == 2 else int(a[0])
 
+    def get_1970_offset(minutes_before_now):
+        #Convert time to minutes since 1/1/1970 00:00
+        t_delta  = datetime.now() - datetime(year=1970,month=1,day=1)
+        offset = int(t_delta.total_seconds()/60) - minutes_before_now
+        return offset
+
     try:
         mac = alias.resolve(label=label)
         device = GoveeThermometerHygrometer(mac)
         await device.connect()
-        start = min(parseTimeStr(start) if start else 60, 28800)
-        end = min(parseTimeStr(end) if end else 0, 28800)
+        if device_type == "H5179":
+            start = get_1970_offset(parseTimeStr(start)) if start else get_1970_offset(60)
+            end = get_1970_offset(parseTimeStr(end)) if end else get_1970_offset(0)
+            #ensure start time is older than end time
+            starttime = start if start < end else end
+            endtime = end if end > start else start
+        else:
+            start = min(parseTimeStr(start) if start else 60, 28800)
+            end = min(parseTimeStr(end) if end else 0, 28800)
+            #ensure start time is older than end time
+            starttime = start if start > end else end
+            endtime = end if end < start else start
+        LOGGER.debug(f"Device type: {device_type}, start: {str(start)}, end: {str(end)}")
         await device.requestHumidityOffset()
         await device.requestTemperatureOffset()
-        measurements = await device.requestRecordedData(start=start if start > end else end, end=end if end < start else start)
+        measurements = await device.requestRecordedData(start=starttime, end=endtime, device_type =device_type)
         if _json:
             print(json.dumps([m.to_dict()
                               for m in measurements], indent=2))
@@ -1062,10 +1220,10 @@ if __name__ == '__main__':
 
             elif args.data:
                 asyncio.run(recorded_data(label=args.address,
-                            start=args.start, end=args.end, _json=args.json))
+                            start=args.start, end=args.end, _json=args.json, device_type = args.device_type))
 
             else:
-                asyncio.run(device_info(label=args.address, _json=args.json))
+                asyncio.run(device_info(label=args.address, _json=args.json, device_type = args.device_type))
 
     except KeyboardInterrupt:
         pass
