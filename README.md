@@ -39,7 +39,8 @@ options:
   --set-temperature-offset <offset>
                         set offset for temperature to calibrate. Range is from -3.0 to 3.0 in steps of 0.1, e.g. -1.0
   -d, --data            request recorded data for given MAC address or alias
-  --device-type DeviceType      specify type of thermometer - H5179, H5074 or H5075 (default)
+  --device-type "DeviceType"
+                        specify type of thermometer - H5179, H5074 or H5075 (default)
   --start <hhh:mm>      request recorded data from start time expression, e.g. 480:00 (here max. value 20 days)
   --end <hhh:mm>        request recorded data to end time expression, e.g. 480:00 (here max. value 20 days)
   -j, --json            print in JSON format
