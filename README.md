@@ -18,7 +18,9 @@ sudo apt install python3-bleak
 ```
 $ ./govee-h5075.py --help
 usage: govee-h5075.py [-h] [-a ADDRESS] [-s] [-m] [--status] [-i] [--set-humidity-alarm "<on|off> <lower> <upper>"] [--set-temperature-alarm "<on|off> <lower> <upper>"]
-                      [--set-humidity-offset <offset>] [--set-temperature-offset <offset>] [-d] [--start <hhh:mm>] [--end <hhh:mm>] [-j] [-l {DEBUG,INFO,WARN,ERROR}]
+                      [--set-humidity-offset <offset>] [--set-temperature-offset <offset>] [-d] [--start <hhh:mm>] [--end <hhh:mm>] [-j]
+                      [--device-type "DeviceType"]
+                      [-l {DEBUG,INFO,WARN,ERROR}]
 
 Shell script in order to request Govee H5075 temperature humidity sensor
 
