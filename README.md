@@ -339,6 +339,7 @@ or for a Govee H5179
 2025-03-18 18:44  6.7°C       5.6°C     44.1°F       42.1°F     92.9%          7.1 g/m³      9.1 mbar
 2025-03-18 18:43  6.7°C       5.6°C     44.1°F       42.1°F     92.9%          7.1 g/m³      9.1 mbar
 
+
 ## Configure device
 To configure alarms and offset values type the following:
 ```
