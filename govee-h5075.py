@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-#Modified to add support for Govee H5179 thermometers
+#Modified to add support for Govee H5179 and H5074 thermometers
 import argparse
 import asyncio
 import json
