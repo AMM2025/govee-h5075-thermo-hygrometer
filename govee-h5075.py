@@ -640,8 +640,16 @@ class GoveeThermometerHygrometer(BleakClient):
         LOGGER.info(f"{self.address}: received device name: {name}")
 
         self.name = name or self.name
-        self.manufacturer = name[0:2]
-        self.model = name[2:7]
+        if "H5075" in self.name:
+            self.manufacturer = name[0:2]
+            self.model = name[2:7]
+        elif "H5074" in self.name or "H5179" in self.name:
+            self.manufacturer = name[0:5]
+            self.model = name[6:11]
+        else:
+            self.manufacturer = "Unknown"
+            self.model = "Unknown"
+            
         return self.name
 
     async def requestHumidityAlarm(self) -> None:
@@ -779,6 +787,15 @@ class GoveeThermometerHygrometer(BleakClient):
 
         found_devices = list()
         
+        def decode_5074(bytes) -> 'tuple[float,float]':
+            # Decode data from Govee 5074
+            temperatureC, relHumidity = struct.unpack("<hh", bytes[1:5]) 
+            temperatureC /= 100
+            relHumidity /= 100
+            battery = bytes[5]
+
+            return round(temperatureC,1), round(relHumidity,1), battery
+            
         def decode_5179(mfg_data):
             # Decode advertising data from Govee 5179
             #Courtesy of ThrilleratPlay on Github
@@ -794,8 +811,11 @@ class GoveeThermometerHygrometer(BleakClient):
         def callback(device: BLEDevice, advertising_data: AdvertisementData):
 
             if unique is False or device.address not in found_devices:
-                found_devices.append(device.address)
-                LOGGER.debug(f"{device.address} ({device.name})")
+                #Only record as found if advertisement has measurement data
+                if 0xec88 in advertising_data.manufacturer_data \
+                    or 0x8801 in advertising_data.manufacturer_data:
+                    found_devices.append(device.address)
+                    LOGGER.debug(f"Found {device.address} ({device.name})")
                 if device.name and device.address.upper()[0:9] in GoveeThermometerHygrometer.MAC_PREFIX:
                     #print (advertising_data)
                     if 0xec88 in advertising_data.manufacturer_data:
@@ -808,13 +828,18 @@ class GoveeThermometerHygrometer(BleakClient):
                         else:
                             humidityOffset = 0.0
                             temperatureOffset = 0.0
-
-                        measurement = Measurement.from_bytes(
-                            bytes=advertising_data.manufacturer_data[0xec88][1:4], humidityOffset=humidityOffset, temperatureOffset=temperatureOffset)
+                        
+                        #H5075 and H5074 have different format
+                        if "H5074" in device.name:
+                            temperatureC, relHumidity, battery = decode_5074(advertising_data.manufacturer_data[0xec88])
+                            measurement = Measurement(datetime.now(), temperatureC, relHumidity, 0, 0)
+                        else:
+                            measurement = Measurement.from_bytes(
+                                bytes=advertising_data.manufacturer_data[0xec88][1:4], humidityOffset=humidityOffset, temperatureOffset=temperatureOffset)
+                            battery = advertising_data.manufacturer_data[0xec88][4]
 
                         LOGGER.debug(f"{device.address}: Decoded measurement data("
                                      f"{MyLogger.hexstr(advertising_data.manufacturer_data[0xec88][0:4])}) is temperature={measurement.temperatureC}°C, humidity={measurement.relHumidity}%")
-                        battery = advertising_data.manufacturer_data[0xec88][4]
                         LOGGER.debug(f"{device.address}: Decoded battery data("
                                      f"{hex(advertising_data.manufacturer_data[0xec88][4])}) is {battery}%")
 
@@ -965,8 +990,6 @@ def arg_parse(args: 'list[str]') -> dict:
     parser.add_argument(
         '-d', '--data', help='request recorded data for given MAC address or alias', action='store_true')
     parser.add_argument(
-        '--device-type', help='specify type of thermometer H5179, H5074 or H5075 (default)', type = str, default = "H5075")
-    parser.add_argument(
         '--start', metavar="<hhh:mm>", help='request recorded data from start time expression, e.g. 480:00 (here max. value 20 days)', type=str, default=None)
     parser.add_argument(
         '--end', metavar="<hhh:mm>", help='request recorded data to end time expression, e.g. 480:00 (here max. value 20 days)', type=str, default=None)
@@ -1040,7 +1063,7 @@ async def status(label: str, _json: bool = False) -> None:
         await device.disconnect()
 
 
-async def device_info(label: str, _json: bool = False, device_type: str = "H5075") -> None:
+async def device_info(label: str, _json: bool = False) -> None:
 
     try:
         mac = alias.resolve(label=label)
@@ -1054,7 +1077,11 @@ async def device_info(label: str, _json: bool = False, device_type: str = "H5075
         await device.requestHardwareVersion()
         await device.requestFirmwareVersion()
         await device.requestBatteryLevel()
-        await device.requestMeasurementAndBattery(device_type)
+        device_type = device.model
+        if device_type == "H5179":
+            await device.requestMeasurement()
+        else:
+            await device.requestMeasurementAndBattery(device_type)
 
         await asyncio.sleep(.5)
         if _json:
@@ -1137,7 +1164,7 @@ async def configure_device(label: str, humidityAlarm: str = None, temperatureAla
         await device.disconnect()
 
 
-async def recorded_data(label: str, start: str, end: str, _json: bool = False, device_type: str = "H5075"):
+async def recorded_data(label: str, start: str, end: str, _json: bool = False):
 
     def parseTimeStr(s: str) -> int:
 
@@ -1154,6 +1181,9 @@ async def recorded_data(label: str, start: str, end: str, _json: bool = False, d
         mac = alias.resolve(label=label)
         device = GoveeThermometerHygrometer(mac)
         await device.connect()
+        #Get device name - this loads self.model with the device type
+        await device.requestDeviceName()
+        device_type = device.model
         if device_type == "H5179":
             start = get_1970_offset(parseTimeStr(start)) if start else get_1970_offset(60)
             end = get_1970_offset(parseTimeStr(end)) if end else get_1970_offset(0)
@@ -1220,10 +1250,10 @@ if __name__ == '__main__':
 
             elif args.data:
                 asyncio.run(recorded_data(label=args.address,
-                            start=args.start, end=args.end, _json=args.json, device_type = args.device_type))
+                            start=args.start, end=args.end, _json=args.json))
 
             else:
-                asyncio.run(device_info(label=args.address, _json=args.json, device_type = args.device_type))
+                asyncio.run(device_info(label=args.address, _json=args.json))
 
     except KeyboardInterrupt:
         pass
