@@ -321,7 +321,7 @@ $ govee-h5075.py -a Bedroom -d --start 0:20 --end 0:10 -j
 or for a Govee H5179
 
 ```
-./govee-h5075.py -a "1C:9F:24:E2:AB:C6" --device-type "H5179" --data --start 0:10
+./govee-h5075.py -a "1C:9F:24:E2:AB:C6" --data --start 0:10
 
 2025-03-18 18:57  6.4°C       5.3°C     43.5°F       41.5°F     92.7%          6.9 g/m³      8.9 mbar
 2025-03-18 18:56  6.5°C       5.4°C     43.7°F       41.7°F     92.7%          7.0 g/m³      8.9 mbar
